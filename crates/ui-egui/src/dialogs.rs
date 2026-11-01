@@ -1434,7 +1434,7 @@ fn dialog_recovery(ui: &mut egui::Ui, app: &mut PdfCraftApp) -> bool {
     ui.add_space(6.0);
     ui.label(tl!("PdfCraft didn't shut down normally. These documents had changes that were autosaved:"));
     ui.add_space(8.0);
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     egui::Grid::new("recoverable").num_columns(2).spacing([18.0, 6.0]).show(ui, |ui| {
         for m in &app.recoverable {
             ui.label(egui::RichText::new(&m.name).font(theme::medium(13.0)));
