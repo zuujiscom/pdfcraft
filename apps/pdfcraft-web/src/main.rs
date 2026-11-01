@@ -4,6 +4,9 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 #[cfg(target_arch = "wasm32")]
+mod recovery;
+
+#[cfg(target_arch = "wasm32")]
 fn main() {
     use eframe::wasm_bindgen::JsCast;
     use pdfcraft_ui_egui::PdfCraftApp;
@@ -17,16 +20,28 @@ fn main() {
         else {
             return;
         };
+        // Copies of unsaved documents a closed or crashed tab left, read before the app is built.
+        let (sink, found, warnings) = recovery::Sink::new(recovery::open().await);
+        let mut found = Some(found);
         let started = eframe::WebRunner::new()
             .start(
                 canvas,
                 options,
-                Box::new(|cc| {
+                Box::new(move |cc| {
                     let mut app = PdfCraftApp::new();
                     // "printcraft": settings saved under the app's former name, PrintCraft.
                     if let Some(json) = cc.storage.and_then(|s| s.get_string("pdfcraft").or_else(|| s.get_string("printcraft"))) {
                         app.restore(&json);
                     }
+                    // Autosave into IndexedDB; the usual "Recover unsaved documents?" dialog offers
+                    // what earlier sessions left.
+                    sink.set_waker(&cc.egui_ctx);
+                    for w in &warnings {
+                        eframe::web_sys::console::warn_1(&format!("PdfCraft crash recovery: {w}").into());
+                    }
+                    app.enable_recovery(pdfcraft_ui_egui::RecoveryStore::new_web(sink.clone(), found.take().unwrap_or_default()));
+                    // Hidden tab (switched away, phone locked): copy at once, it may be discarded next.
+                    hide_hook(app.autosave_flush.clone(), cc.egui_ctx.clone());
                     // `?file=<url>` opens a PDF from a URL (same-origin or CORS-enabled).
                     if let Some(url) = query_param("file") {
                         let inbox = app.startup_inbox.clone();
@@ -97,10 +112,26 @@ fn warn_before_unload(unsaved: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
         if unsaved.load(std::sync::atomic::Ordering::Relaxed) {
             event.prevent_default();
+            // Older Safari and Chrome ask only when returnValue is set.
+            if let Some(e) = event.dyn_ref::<web_sys::BeforeUnloadEvent>() {
+                e.set_return_value("unsaved changes");
+            }
         }
     });
     if window.add_event_listener_with_callback("beforeunload", handler.as_ref().unchecked_ref()).is_ok() {
         handler.forget();
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn hide_hook(flush: std::sync::Arc<std::sync::atomic::AtomicBool>, ctx: egui::Context) {
+    match craft_web_recovery::HiddenHook::new(move || {
+        flush.store(true, std::sync::atomic::Ordering::Relaxed);
+        ctx.request_repaint();
+    }) {
+        // Lives as long as the page.
+        Ok(hook) => std::mem::forget(hook),
+        Err(e) => eframe::web_sys::console::warn_1(&format!("PdfCraft: no hidden-tab hook: {e}").into()),
     }
 }
 

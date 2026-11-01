@@ -7,7 +7,13 @@
 //! missing or damaged; those recover without an original path, so saving asks for a destination.
 //!
 //! Encrypted documents are stored encrypted (the working file is), so recovery never writes
-//! plaintext of a protected document to disk. The web build has no recovery store yet.
+//! plaintext of a protected document to disk.
+//!
+//! The web build has no folder. There the store keeps the entries in memory and mirrors every
+//! write and removal to a [`WebSink`] the page provides (IndexedDB, in `pdfcraft-web`); entries
+//! left by closed or crashed tabs are handed in with [`RecoveryStore::new_web`], so the same
+//! "Recover unsaved documents?" dialog offers them. Copies are written every 10 s, and at once
+//! when the tab is hidden.
 //!
 //! On Unix the folder is owner-only (`0o700`), so other accounts on the machine can't read the
 //! snapshots of documents that aren't encrypted.
@@ -17,15 +23,20 @@
 //! crash's leftovers and neither offers nor discards them (#2166). The OS releases the lock
 //! when the process dies.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::{File, TryLockError};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, OnceLock};
 
 use crate::PdfCraftApp;
 
-/// How often unsaved changes are written to the recovery folder.
-pub const AUTOSAVE_SECS: f64 = 60.0;
+/// How often unsaved changes are written to the recovery folder (the web build writes to browser
+/// storage, a reload is far likelier than a crash there, so it copies more often).
+pub const AUTOSAVE_SECS: f64 = if cfg!(target_arch = "wasm32") { 10.0 } else { 60.0 };
 
 /// What a recovery entry records next to the PDF bytes.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -45,6 +56,7 @@ pub struct RecoveryMeta {
 }
 
 /// The recovery folder.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 pub struct RecoveryStore {
     dir: PathBuf,
@@ -54,15 +66,18 @@ pub struct RecoveryStore {
     lock: Arc<OnceLock<Option<InstanceLock>>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// An open, exclusively locked `instance-<pid>-<n>.lock` in the folder, released and removed
 /// with the last clone of its store.
 #[derive(Debug)]
+#[cfg(not(target_arch = "wasm32"))]
 struct InstanceLock {
     name: String,
     path: PathBuf,
     file: File,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for InstanceLock {
     fn drop(&mut self) {
         let _ = self.file.unlock();
@@ -71,8 +86,10 @@ impl Drop for InstanceLock {
 }
 
 /// Tells this process's stores apart: tests make several, and a dropped one's lock is free.
+#[cfg(not(target_arch = "wasm32"))]
 static CLAIMS: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(not(target_arch = "wasm32"))]
 impl RecoveryStore {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into(), lock: Arc::default() }
@@ -276,8 +293,94 @@ impl RecoveryStore {
     }
 }
 
+/// Where the web build keeps its recovery copies (IndexedDB, in `pdfcraft-web`). Calls return at
+/// once; the page reports whether the browser really stored a copy through [`WebSink::failure`].
+#[cfg(target_arch = "wasm32")]
+pub trait WebSink {
+    /// A key for a new entry of document `doc` (unique to this page load).
+    fn key(&self, doc: u64) -> String;
+    /// Create or replace the copy `meta.key`; `Err` when it could not even be queued.
+    fn put(&self, meta: &RecoveryMeta, bytes: &[u8]) -> Result<(), String>;
+    fn remove(&self, key: &str);
+    /// A write that failed after being queued (browser storage full, disabled, ...), once. The
+    /// sink keeps that copy and offers it again to the next `put`.
+    fn failure(&self) -> Option<String>;
+}
+
+/// The recovery copies of the web build: this page's entries and those a closed or crashed tab
+/// left, in memory, mirrored to a [`WebSink`].
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+pub struct RecoveryStore {
+    sink: std::rc::Rc<dyn WebSink>,
+    entries: std::rc::Rc<std::cell::RefCell<Vec<(RecoveryMeta, std::rc::Rc<Vec<u8>>)>>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl RecoveryStore {
+    /// `found`: copies of earlier sessions the sink has already taken over.
+    pub fn new_web(sink: std::rc::Rc<dyn WebSink>, found: Vec<(RecoveryMeta, Vec<u8>)>) -> Self {
+        let entries = found.into_iter().map(|(m, b)| (m, std::rc::Rc::new(b))).collect();
+        Self { sink, entries: std::rc::Rc::new(std::cell::RefCell::new(entries)) }
+    }
+
+    pub fn claim(&self) {}
+
+    /// No folder in the browser.
+    pub fn default_dir() -> Option<std::path::PathBuf> {
+        None
+    }
+
+    pub fn instance(&self) -> Option<String> {
+        None
+    }
+
+    pub fn new_key(&self, doc: u64) -> String {
+        self.sink.key(doc)
+    }
+
+    /// Why an earlier write failed, if one did since the last call.
+    pub fn take_failure(&self) -> Option<String> {
+        self.sink.failure()
+    }
+
+    pub fn write(&self, meta: &RecoveryMeta, bytes: &[u8]) -> std::io::Result<()> {
+        self.sink.put(meta, bytes).map_err(std::io::Error::other)?;
+        let mut entries = self.entries.borrow_mut();
+        entries.retain(|(m, _)| m.key != meta.key);
+        entries.push((meta.clone(), std::rc::Rc::new(bytes.to_vec())));
+        Ok(())
+    }
+
+    pub fn remove(&self, key: &str) {
+        self.sink.remove(key);
+        self.entries.borrow_mut().retain(|(m, _)| m.key != key);
+    }
+
+    /// Entries left by earlier sessions that were not recovered or discarded yet, newest first.
+    pub fn list(&self) -> Vec<RecoveryMeta> {
+        let mut out: Vec<RecoveryMeta> = self.entries.borrow().iter().map(|(m, _)| m.clone()).collect();
+        out.sort_by_key(|m| std::cmp::Reverse(m.saved_at));
+        out
+    }
+
+    pub fn repair_meta(&self, _meta: &RecoveryMeta) {}
+
+    pub fn read(&self, key: &str) -> std::io::Result<Vec<u8>> {
+        let entries = self.entries.borrow();
+        let found = entries.iter().find(|(m, _)| m.key == key);
+        found.map(|(_, b)| b.to_vec()).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "recovery copy not found"))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now_secs() -> u64 {
+    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 impl PdfCraftApp {
@@ -295,12 +398,30 @@ impl PdfCraftApp {
     pub fn autosave_now(&mut self) {
         let Some(store) = self.recovery.clone() else { return };
         for snap in self.session.autosave_snapshots() {
+            #[cfg(not(target_arch = "wasm32"))]
             let key = self.recovery_keys.entry(snap.doc).or_insert_with(|| format!("{}-{}-{}", now_secs(), std::process::id(), snap.doc.0)).clone();
+            #[cfg(target_arch = "wasm32")]
+            let key = self.recovery_keys.entry(snap.doc).or_insert_with(|| store.new_key(snap.doc.0 as u64)).clone();
             let meta =
                 RecoveryMeta { key, name: snap.name, path: snap.path, saved_at: now_secs(), encrypted: snap.encrypted, instance: store.instance() };
             if let Err(e) = store.write(&meta, &snap.bytes) {
                 log::warn!("autosave failed: {e}");
+                #[cfg(target_arch = "wasm32")]
+                self.warn_web_recovery(&e.to_string());
             }
+        }
+        #[cfg(target_arch = "wasm32")]
+        if let Some(e) = store.take_failure() {
+            self.warn_web_recovery(&e);
+        }
+    }
+
+    /// Tell the user, once per page load, that browser storage refused a copy
+    /// (full quota, storage turned off): their unsaved work is then not protected.
+    #[cfg(target_arch = "wasm32")]
+    fn warn_web_recovery(&mut self, e: &str) {
+        if !std::mem::replace(&mut self.recovery_warned, true) {
+            self.notify_fmt("Couldn't keep a recovery copy in this browser: {e}. Save your work to be safe.", &[("e", e)]);
         }
     }
 
@@ -328,7 +449,9 @@ impl PdfCraftApp {
             }
             return;
         };
-        if now.duration_since(last).as_secs_f64() >= AUTOSAVE_SECS {
+        // The tab was hidden (web): the browser may discard it next, so copy now.
+        let flush = self.autosave_flush.swap(false, std::sync::atomic::Ordering::Relaxed);
+        if flush || now.duration_since(last).as_secs_f64() >= AUTOSAVE_SECS {
             self.last_autosave = Some(now);
             self.autosave_now();
         }

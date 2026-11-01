@@ -242,6 +242,9 @@ impl PdfCraftApp {
             recoverable: Vec::new(),
             recovery_keys: Default::default(),
             last_autosave: None,
+            autosave_flush: Default::default(),
+            #[cfg(target_arch = "wasm32")]
+            recovery_warned: false,
             allow_quit: false,
             deferred_commands: Vec::new(),
             native_menu: None,

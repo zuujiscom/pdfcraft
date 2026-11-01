@@ -69,6 +69,8 @@ pub use canvas::{DocView, RasterMemory};
 pub use editing::{CloseRequest, SaveTarget};
 pub use files::{ExtractDraft, FilePurpose, FileRequest, RotateDraft, SplitDraft, SplitMode, SplitPlan};
 pub use recovery::{AUTOSAVE_SECS, RecoveryMeta, RecoveryStore};
+#[cfg(target_arch = "wasm32")]
+pub use recovery::WebSink;
 use theme::{ThemeKind, ThemePreference};
 
 mod app;
@@ -572,6 +574,10 @@ pub struct PdfCraftApp {
     pub recoverable: Vec<RecoveryMeta>,
     recovery_keys: std::collections::HashMap<DocId, String>,
     last_autosave: Option<web_time::Instant>,
+    /// Set by the page when the tab is hidden: the next frame writes recovery copies at once.
+    pub autosave_flush: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(target_arch = "wasm32")]
+    recovery_warned: bool,
     allow_quit: bool,
     /// Shortcuts pressed while a text field had the keyboard, run on the next frame (see
     /// `registry_shortcuts`).
