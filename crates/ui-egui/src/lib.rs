@@ -77,6 +77,8 @@ pub const MIN_WINDOW_SIZE: [f32; 2] = [480.0, 520.0];
 pub use editing::{CloseRequest, SaveTarget};
 pub use files::{ExtractDraft, FilePurpose, FileRequest, RotateDraft, SplitDraft, SplitMode, SplitPlan};
 pub use recovery::{AUTOSAVE_SECS, RecoveryMeta, RecoveryStore, default_dictionary_dir};
+#[cfg(target_arch = "wasm32")]
+pub use recovery::WebSink;
 use theme::{ThemeKind, ThemePreference};
 pub use workflows::ocr_verify::{OcrVerify, Phase};
 
@@ -683,6 +685,10 @@ pub struct PdfCraftApp {
     /// yet: their first Save asks where, starting at that path, instead of writing it (#3923).
     recovered_paths: std::collections::HashSet<DocId>,
     last_autosave: Option<web_time::Instant>,
+    /// Set by the page when the tab is hidden: the next frame writes recovery copies at once.
+    pub autosave_flush: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(target_arch = "wasm32")]
+    recovery_warned: bool,
     allow_quit: bool,
     /// Shortcuts pressed while a text field had the keyboard, run on the next frame (see
     /// `registry_shortcuts`).
