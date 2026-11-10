@@ -211,11 +211,11 @@ impl RecoveryStore {
 /// the portable data folder's `Dictionary` in portable mode ([`crate::portable`]), otherwise
 /// `…/PdfCraft/Dictionary` in the platform's per-user data folder. `None` where files are not
 /// kept (the web build).
-pub fn default_dictionary_dir() -> Option<PathBuf> {
+pub fn default_dictionary_dir() -> Option<std::path::PathBuf> {
     if let Some(dir) = crate::portable::data_dir() {
         return Some(dir.join("Dictionary"));
     }
-    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
     if cfg!(target_os = "macos") {
         env("HOME").map(|h| h.join("Library/Application Support/PdfCraft/Dictionary"))
     } else if cfg!(windows) {
@@ -225,6 +225,7 @@ pub fn default_dictionary_dir() -> Option<PathBuf> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl RecoveryStore {
     /// Write (or replace) an entry. The PDF is written before its metadata, both atomically, so
     /// a listed entry always has complete bytes.
@@ -335,10 +336,12 @@ impl RecoveryStore {
 
 /// The most a sidecar may hold. One PdfCraft writes is a name, a path and a few fields, well under
 /// this; anything longer is not one of ours (#3923).
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_META_BYTES: u64 = 64 * 1024;
 
 /// A sidecar's metadata, read through [`MAX_META_BYTES`] so a planted file can't make the start-up
 /// listing read gigabytes. A longer file is refused, and its snapshot recovers without metadata.
+#[cfg(not(target_arch = "wasm32"))]
 fn read_meta(path: &Path) -> std::io::Result<RecoveryMeta> {
     use std::io::Read;
     let mut bytes = Vec::new();
